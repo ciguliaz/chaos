@@ -1,39 +1,57 @@
 import Phaser from 'phaser';
 import { BOARD_SIZE, TILE_SIZE, BOARD_OFFSET_X, BOARD_OFFSET_Y } from '../utils/Constants';
 import { Board } from '../board/Board';
-import { PieceColor, PieceType } from '../game/types';
+import { TurnManager } from '../systems/TurnManager';
+import { ChessSystem } from '../systems/ChessSystem';
+import {
+  PieceColor, PieceType, EntityType,
+  ChessPieceEntity, Position,
+} from '../game/types';
 
 /**
- * GameScene — the core chess board gameplay.
- * Phase 1: renders an 8x8 grid with chess pieces and basic movement.
+ * GameScene — the core board gameplay.
+ * Uses the modular system architecture:
+ *   Board (generic grid) + TurnManager + ChessSystem (pluggable)
  */
 export class GameScene extends Phaser.Scene {
   private board!: Board;
-  private selectedTile: { row: number; col: number } | null = null;
+  private turnManager!: TurnManager;
+  private selectedTile: Position | null = null;
   private tileGraphics: Phaser.GameObjects.Rectangle[][] = [];
   private pieceTexts: (Phaser.GameObjects.Text | null)[][] = [];
   private highlightGraphics: Phaser.GameObjects.Rectangle[] = [];
   private turnText!: Phaser.GameObjects.Text;
   private statusText!: Phaser.GameObjects.Text;
+  private gameOver = false;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create(): void {
-    this.board = new Board();
+    // ─── Set up modular architecture ────────────────
+    this.board = new Board(BOARD_SIZE, BOARD_SIZE);
+    this.turnManager = new TurnManager(this.board);
+
+    // Register game systems (add more here as we build regions)
+    this.turnManager.registerSystem(new ChessSystem());
+
+    // ─── Reset state ────────────────────────────────
     this.selectedTile = null;
     this.tileGraphics = [];
     this.pieceTexts = [];
     this.highlightGraphics = [];
+    this.gameOver = false;
 
-    this.createBoard();
+    // ─── Render ─────────────────────────────────────
+    this.createBoardGraphics();
     this.createUI();
-    this.renderPieces();
+    this.renderEntities();
   }
 
-  /** Draw the 8x8 chessboard grid */
-  private createBoard(): void {
+  // ─── Board Rendering ──────────────────────────────
+
+  private createBoardGraphics(): void {
     for (let row = 0; row < BOARD_SIZE; row++) {
       this.tileGraphics[row] = [];
       for (let col = 0; col < BOARD_SIZE; col++) {
@@ -63,7 +81,8 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Create HUD elements */
+  // ─── UI ───────────────────────────────────────────
+
   private createUI(): void {
     this.turnText = this.add.text(BOARD_OFFSET_X, 10, 'Turn: White', {
       fontFamily: 'monospace',
@@ -77,7 +96,6 @@ export class GameScene extends Phaser.Scene {
       color: '#8888cc',
     });
 
-    // Back to menu button
     const backBtn = this.add.text(10, 10, '← Menu', {
       fontFamily: 'monospace',
       fontSize: '12px',
@@ -89,33 +107,32 @@ export class GameScene extends Phaser.Scene {
     backBtn.on('pointerdown', () => this.scene.start('MenuScene'));
   }
 
-  /** Render chess pieces as Unicode characters on the board */
-  private renderPieces(): void {
-    // Clear old piece texts
+  // ─── Entity Rendering ────────────────────────────
+
+  private renderEntities(): void {
+    // Clear old
     for (const row of this.pieceTexts) {
-      if (row) {
-        for (const text of row) {
-          text?.destroy();
-        }
-      }
+      if (row) for (const text of row) text?.destroy();
     }
     this.pieceTexts = [];
 
     for (let row = 0; row < BOARD_SIZE; row++) {
       this.pieceTexts[row] = [];
       for (let col = 0; col < BOARD_SIZE; col++) {
-        const piece = this.board.getPiece(row, col);
-        if (piece) {
+        const entity = this.board.getEntity(row, col);
+
+        if (entity && entity.entityType === EntityType.ChessPiece) {
+          const piece = entity as ChessPieceEntity;
           const x = BOARD_OFFSET_X + col * TILE_SIZE + TILE_SIZE / 2;
           const y = BOARD_OFFSET_Y + row * TILE_SIZE + TILE_SIZE / 2;
-          const symbol = this.getPieceSymbol(piece.type, piece.color);
+          const symbol = this.getPieceSymbol(piece.pieceType, piece.color);
+
           const text = this.add.text(x, y, symbol, {
             fontFamily: 'serif',
             fontSize: '40px',
             color: piece.color === PieceColor.White ? '#ffffff' : '#222222',
           }).setOrigin(0.5);
 
-          // Add a subtle shadow for readability
           if (piece.color === PieceColor.White) {
             text.setStroke('#000000', 2);
           } else {
@@ -130,42 +147,47 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Handle tile click — select piece or move piece */
+  // ─── Input Handling ───────────────────────────────
+
   private onTileClick(row: number, col: number): void {
-    const currentTurn = this.board.getCurrentTurn();
+    if (this.gameOver) return;
+
+    const currentTurn = this.turnManager.getCurrentTurn();
 
     if (this.selectedTile) {
       // Try to move
       const from = this.selectedTile;
-      const success = this.board.movePiece(from.row, from.col, row, col);
+      const validMoves = this.turnManager.getValidMoves(from);
+      const isValid = validMoves.some(m => m.row === row && m.col === col);
 
       this.clearHighlights();
       this.selectedTile = null;
 
-      if (success) {
-        this.renderPieces();
+      if (isValid) {
+        // Execute move through TurnManager
+        this.turnManager.executeMove({ from, to: { row, col } });
+        this.turnManager.endTurn();
+        this.renderEntities();
 
-        // Check win/lose
-        const winner = this.board.checkWinner();
+        // Check win
+        const winner = this.turnManager.checkWinCondition();
         if (winner) {
-          this.statusText.setText(`${winner === PieceColor.White ? 'White' : 'Black'} wins! King captured!`);
-          this.statusText.setColor('#ffaa00');
-          this.turnText.setText('GAME OVER');
+          this.onGameOver(winner);
           return;
         }
 
-        this.turnText.setText(`Turn: ${this.board.getCurrentTurn() === PieceColor.White ? 'White' : 'Black'}`);
+        this.turnText.setText(`Turn: ${this.turnManager.getCurrentTurn() === PieceColor.White ? 'White' : 'Black'}`);
         this.statusText.setText('Select a piece to move');
 
-        // If it's now Black's turn, trigger simple AI
-        if (this.board.getCurrentTurn() === PieceColor.Black) {
+        // AI turn
+        if (this.turnManager.getCurrentTurn() === PieceColor.Black) {
           this.statusText.setText('Black is thinking...');
           this.time.delayedCall(400, () => this.doAIMove());
         }
       } else {
-        // Invalid move — check if clicking own piece to re-select
-        const piece = this.board.getPiece(row, col);
-        if (piece && piece.color === currentTurn) {
+        // Re-select if clicking own piece
+        const entity = this.board.getEntity(row, col);
+        if (entity && entity.color === currentTurn) {
           this.selectTile(row, col);
         } else {
           this.statusText.setText('Invalid move. Select a piece.');
@@ -173,78 +195,81 @@ export class GameScene extends Phaser.Scene {
       }
     } else {
       // Select a piece
-      const piece = this.board.getPiece(row, col);
-      if (piece && piece.color === currentTurn) {
+      const entity = this.board.getEntity(row, col);
+      if (entity && entity.color === currentTurn) {
         this.selectTile(row, col);
       }
     }
   }
 
-  /** Highlight selected tile and valid moves */
+  // ─── Selection & Highlighting ─────────────────────
+
   private selectTile(row: number, col: number): void {
     this.clearHighlights();
     this.selectedTile = { row, col };
 
-    // Highlight selected tile
+    // Highlight selected
     const sx = BOARD_OFFSET_X + col * TILE_SIZE;
     const sy = BOARD_OFFSET_Y + row * TILE_SIZE;
-    const selRect = this.add.rectangle(sx, sy, TILE_SIZE - 1, TILE_SIZE - 1, 0xffff00, 0.3)
-      .setOrigin(0, 0);
-    this.highlightGraphics.push(selRect);
+    this.highlightGraphics.push(
+      this.add.rectangle(sx, sy, TILE_SIZE - 1, TILE_SIZE - 1, 0xffff00, 0.3).setOrigin(0, 0)
+    );
 
     // Highlight valid moves
-    const validMoves = this.board.getValidMoves(row, col);
+    const validMoves = this.turnManager.getValidMoves({ row, col });
     for (const move of validMoves) {
       const mx = BOARD_OFFSET_X + move.col * TILE_SIZE;
       const my = BOARD_OFFSET_Y + move.row * TILE_SIZE;
-      const hasPiece = this.board.getPiece(move.row, move.col) !== null;
-      const moveColor = hasPiece ? 0xff4444 : 0x44ff44;
-      const moveRect = this.add.rectangle(mx, my, TILE_SIZE - 1, TILE_SIZE - 1, moveColor, 0.25)
-        .setOrigin(0, 0);
-      this.highlightGraphics.push(moveRect);
+      const hasEntity = this.board.getEntity(move.row, move.col) !== null;
+      const moveColor = hasEntity ? 0xff4444 : 0x44ff44;
+      this.highlightGraphics.push(
+        this.add.rectangle(mx, my, TILE_SIZE - 1, TILE_SIZE - 1, moveColor, 0.25).setOrigin(0, 0)
+      );
     }
 
-    const piece = this.board.getPiece(row, col);
-    const pieceName = piece ? PieceType[piece.type] : '';
+    const entity = this.board.getEntity(row, col);
+    const pieceName = entity?.entityType === EntityType.ChessPiece
+      ? (entity as ChessPieceEntity).pieceType
+      : 'Entity';
     this.statusText.setText(`Selected: ${pieceName} (${validMoves.length} moves)`);
   }
 
   private clearHighlights(): void {
-    for (const rect of this.highlightGraphics) {
-      rect.destroy();
-    }
+    for (const rect of this.highlightGraphics) rect.destroy();
     this.highlightGraphics = [];
   }
 
   private isHighlighted(row: number, col: number): boolean {
     if (!this.selectedTile) return false;
     if (this.selectedTile.row === row && this.selectedTile.col === col) return true;
-    const moves = this.board.getValidMoves(this.selectedTile.row, this.selectedTile.col);
+    const moves = this.turnManager.getValidMoves(this.selectedTile);
     return moves.some(m => m.row === row && m.col === col);
   }
 
-  /** Simple AI: pick a random valid move for Black */
+  // ─── AI ───────────────────────────────────────────
+
   private doAIMove(): void {
-    const allMoves = this.board.getAllMovesForColor(PieceColor.Black);
+    if (this.gameOver) return;
+
+    const allMoves = this.turnManager.getAllMovesForColor(PieceColor.Black);
     if (allMoves.length === 0) {
       this.statusText.setText('Black has no moves — stalemate?');
       return;
     }
 
-    // Prioritize captures, then random
-    const captures = allMoves.filter(m => this.board.getPiece(m.toRow, m.toCol) !== null);
+    // Prioritize captures
+    const captures = allMoves.filter(m => this.board.getEntity(m.to.row, m.to.col) !== null);
     const chosen = captures.length > 0
       ? captures[Math.floor(Math.random() * captures.length)]
       : allMoves[Math.floor(Math.random() * allMoves.length)];
 
-    this.board.movePiece(chosen.fromRow, chosen.fromCol, chosen.toRow, chosen.toCol);
-    this.renderPieces();
+    this.turnManager.executeMove(chosen);
+    this.turnManager.endTurn();
+    this.renderEntities();
 
-    const winner = this.board.checkWinner();
+    const winner = this.turnManager.checkWinCondition();
     if (winner) {
-      this.statusText.setText(`${winner === PieceColor.White ? 'White' : 'Black'} wins!`);
-      this.statusText.setColor('#ffaa00');
-      this.turnText.setText('GAME OVER');
+      this.onGameOver(winner);
       return;
     }
 
@@ -252,7 +277,17 @@ export class GameScene extends Phaser.Scene {
     this.statusText.setText('Your turn — select a piece');
   }
 
-  /** Get Unicode chess symbol */
+  // ─── Game Over ────────────────────────────────────
+
+  private onGameOver(winner: PieceColor): void {
+    this.gameOver = true;
+    this.statusText.setText(`${winner === PieceColor.White ? 'White' : 'Black'} wins! King captured!`);
+    this.statusText.setColor('#ffaa00');
+    this.turnText.setText('GAME OVER');
+  }
+
+  // ─── Helpers ──────────────────────────────────────
+
   private getPieceSymbol(type: PieceType, color: PieceColor): string {
     const symbols: Record<PieceType, [string, string]> = {
       [PieceType.King]:   ['♔', '♚'],
