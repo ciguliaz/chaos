@@ -19,6 +19,7 @@ export class ChessSystem implements GameSystem {
   readonly id = 'chess';
 
   onRegister(board: Board): void {
+    pieceIdCounter = 0; // Reset IDs for each new game
     this.placeInitialPieces(board);
   }
 

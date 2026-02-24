@@ -7,6 +7,7 @@ import {
   PieceColor, PieceType, EntityType,
   ChessPieceEntity, Position,
 } from '../game/types';
+import { RunState } from '../map/RunState';
 
 /**
  * GameScene — the core board gameplay.
@@ -23,9 +24,15 @@ export class GameScene extends Phaser.Scene {
   private turnText!: Phaser.GameObjects.Text;
   private statusText!: Phaser.GameObjects.Text;
   private gameOver = false;
+  private isAIThinking = false;
+  private runState: RunState | null = null;
 
   constructor() {
     super({ key: 'GameScene' });
+  }
+
+  init(data: { runState?: RunState }): void {
+    this.runState = data.runState ?? null;
   }
 
   create(): void {
@@ -42,6 +49,7 @@ export class GameScene extends Phaser.Scene {
     this.pieceTexts = [];
     this.highlightGraphics = [];
     this.gameOver = false;
+    this.isAIThinking = false;
 
     // ─── Render ─────────────────────────────────────
     this.createBoardGraphics();
@@ -96,7 +104,8 @@ export class GameScene extends Phaser.Scene {
       color: '#8888cc',
     });
 
-    const backBtn = this.add.text(10, 10, '← Menu', {
+    const backLabel = this.runState ? '← Map' : '← Menu';
+    const backBtn = this.add.text(10, 10, backLabel, {
       fontFamily: 'monospace',
       fontSize: '12px',
       color: '#666688',
@@ -104,7 +113,18 @@ export class GameScene extends Phaser.Scene {
 
     backBtn.on('pointerover', () => backBtn.setColor('#aaaacc'));
     backBtn.on('pointerout', () => backBtn.setColor('#666688'));
-    backBtn.on('pointerdown', () => this.scene.start('MenuScene'));
+    backBtn.on('pointerdown', () => {
+      if (this.runState) {
+        // Reset node from Active back to Available (abandoning mid-battle)
+        if (this.runState.currentNodeId) {
+          this.runState.nodeMap.abandonNode(this.runState.currentNodeId);
+          this.runState.currentNodeId = null;
+        }
+        this.scene.start('NodeMapScene', { runState: this.runState });
+      } else {
+        this.scene.start('MenuScene');
+      }
+    });
   }
 
   // ─── Entity Rendering ────────────────────────────
@@ -150,7 +170,7 @@ export class GameScene extends Phaser.Scene {
   // ─── Input Handling ───────────────────────────────
 
   private onTileClick(row: number, col: number): void {
-    if (this.gameOver) return;
+    if (this.gameOver || this.isAIThinking) return;
 
     const currentTurn = this.turnManager.getCurrentTurn();
 
@@ -182,6 +202,7 @@ export class GameScene extends Phaser.Scene {
         // AI turn
         if (this.turnManager.getCurrentTurn() === PieceColor.Black) {
           this.statusText.setText('Black is thinking...');
+          this.isAIThinking = true;
           this.time.delayedCall(400, () => this.doAIMove());
         }
       } else {
@@ -251,6 +272,8 @@ export class GameScene extends Phaser.Scene {
   private doAIMove(): void {
     if (this.gameOver) return;
 
+    this.isAIThinking = true;
+
     const allMoves = this.turnManager.getAllMovesForColor(PieceColor.Black);
     if (allMoves.length === 0) {
       this.statusText.setText('Black has no moves — stalemate?');
@@ -275,15 +298,42 @@ export class GameScene extends Phaser.Scene {
 
     this.turnText.setText('Turn: White');
     this.statusText.setText('Your turn — select a piece');
+    this.isAIThinking = false;
   }
 
   // ─── Game Over ────────────────────────────────────
 
   private onGameOver(winner: PieceColor): void {
     this.gameOver = true;
-    this.statusText.setText(`${winner === PieceColor.White ? 'White' : 'Black'} wins! King captured!`);
-    this.statusText.setColor('#ffaa00');
-    this.turnText.setText('GAME OVER');
+    const playerWon = winner === PieceColor.White;
+    this.statusText.setText(playerWon ? 'Victory! King captured!' : 'Defeat... Your king has fallen.');
+    this.statusText.setColor(playerWon ? '#44ff44' : '#ff4444');
+    this.turnText.setText(playerWon ? 'VICTORY' : 'DEFEAT');
+
+    // Show continue/retry button
+    const { width, height } = this.scale;
+    const btnLabel = playerWon ? '▶  Continue' : '↻  Try Again';
+
+    const btnBg = this.add.rectangle(width / 2, height - 40, 200, 42, playerWon ? 0x2a5a2a : 0x5a2a2a)
+      .setStrokeStyle(2, playerWon ? 0x44ff44 : 0xff4444)
+      .setInteractive({ useHandCursor: true });
+
+    this.add.text(width / 2, height - 40, btnLabel, {
+      fontFamily: 'monospace',
+      fontSize: '16px',
+      color: '#ffffff',
+    }).setOrigin(0.5);
+
+    btnBg.on('pointerdown', () => {
+      if (playerWon && this.runState) {
+        // Mark node completed and return to map
+        this.runState.completeCurrentNode();
+        this.scene.start('NodeMapScene', { runState: this.runState });
+      } else {
+        // Lose = back to menu
+        this.scene.start('MenuScene');
+      }
+    });
   }
 
   // ─── Helpers ──────────────────────────────────────

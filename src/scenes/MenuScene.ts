@@ -47,7 +47,7 @@ export class MenuScene extends Phaser.Scene {
       btnText.setColor('#ffffff');
     });
     btnBg.on('pointerdown', () => {
-      this.scene.start('GameScene');
+      this.scene.start('NodeMapScene');
     });
 
     // Version
